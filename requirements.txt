@@ -1,0 +1,16 @@
+absl-py
+astor
+decorator
+gast
+grpcio
+Markdown
+networkx
+numpy<1.24
+protobuf
+scikit-learn
+scipy
+six
+tensorboard
+tensorflow
+termcolor
+Werkzeug
