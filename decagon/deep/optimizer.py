@@ -41,9 +41,9 @@ class DecagonOptimizer(object):
                     num_true=1,
                     num_sampled=self.batch_size,
                     unique=False,
-                    range_max=len(self.degrees[i][k]),
+                    range_max=len(self.degrees[j][k]),
                     distortion=0.75,
-                    unigrams=self.degrees[i][k].tolist())
+                    unigrams=self.degrees[j][k].tolist())
                 neg_samples_list.append(neg_samples)
         self.neg_samples = tf.gather(neg_samples_list, self.batch_edge_type_idx)
 
