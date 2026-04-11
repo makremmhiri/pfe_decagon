@@ -32,26 +32,33 @@ class DecagonOptimizer(object):
         self.obj_type_lookup_start = tf.cumsum([0] + obj_type_n[:-1])
         self.obj_type_lookup_end = tf.cumsum(obj_type_n)
 
-        labels = tf.reshape(tf.cast(self.row_inputs, dtype=tf.int64), [self.batch_size, 1])
+        # 1. FIX: Change self.row_inputs to self.col_inputs here
+        labels = tf.reshape(tf.cast(self.col_inputs, dtype=tf.int64), [self.batch_size, 1])
+        
         neg_samples_list = []
         for i, j in self.edge_types:
             for k in range(self.edge_types[i,j]):
+                max_idx = self.obj_type2n[j] 
+                
                 neg_samples, _, _ = tf.nn.fixed_unigram_candidate_sampler(
                     true_classes=labels,
                     num_true=1,
                     num_sampled=self.batch_size,
                     unique=False,
-                    range_max=len(self.degrees[j][k]),
+                    range_max=max_idx,
                     distortion=0.75,
                     unigrams=self.degrees[j][k].tolist())
                 neg_samples_list.append(neg_samples)
+        
         self.neg_samples = tf.gather(neg_samples_list, self.batch_edge_type_idx)
 
         self.preds = self.batch_predict(self.row_inputs, self.col_inputs)
         self.outputs = tf.diag_part(self.preds)
         self.outputs = tf.reshape(self.outputs, [-1])
 
-        self.neg_preds = self.batch_predict(self.neg_samples, self.col_inputs)
+        # 2. FIX: Move self.neg_samples to the SECOND argument (column)
+        self.neg_preds = self.batch_predict(self.row_inputs, self.neg_samples)
+        
         self.neg_outputs = tf.diag_part(self.neg_preds)
         self.neg_outputs = tf.reshape(self.neg_outputs, [-1])
 

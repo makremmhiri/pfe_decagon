@@ -161,6 +161,7 @@ for combo, se_set in combo2se.items():
 
 drug_drug_adj_list = []
 sorted_se = sorted(list(se2name.keys()))
+sorted_se = sorted_se[:200]
 for se in sorted_se:
     mat = sp.dok_matrix((n_drugs, n_drugs), dtype=float)
     for idx1, idx2 in se_to_combos[se]:
@@ -234,7 +235,8 @@ flags.DEFINE_integer('hidden2', 32, 'Number of units in hidden layer 2.')
 flags.DEFINE_float('weight_decay', 0, 'Weight for L2 loss on embedding matrix.')
 flags.DEFINE_float('dropout', 0.1, 'Dropout rate (1 - keep probability).')
 flags.DEFINE_float('max_margin', 0.1, 'Max margin parameter in hinge loss')
-flags.DEFINE_integer('batch_size', 512, 'minibatch size.')
+#512
+flags.DEFINE_integer('batch_size', 16, 'minibatch size.')
 flags.DEFINE_boolean('bias', True, 'Bias term.')
 # Important -- Do not evaluate/print validation performance every iteration as it can take
 # substantial amount of time
