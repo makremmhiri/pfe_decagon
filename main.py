@@ -5,6 +5,8 @@ from itertools import combinations
 from collections import defaultdict
 import time
 import os
+import sys
+import re
 
 import tensorflow.compat.v1 as tf
 tf.disable_v2_behavior()
@@ -29,6 +31,7 @@ config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 config.allow_soft_placement = True
 
+os.environ['PYTHONHASHSEED'] = '0'
 np.random.seed(0)
 
 ###########################################################
@@ -74,6 +77,10 @@ def get_accuracy_scores(edges_pos, edges_neg, edge_type):
     preds_all = np.hstack([preds, preds_neg])
     preds_all = np.nan_to_num(preds_all)
     labels_all = np.hstack([np.ones(len(preds)), np.zeros(len(preds_neg))])
+    # ADD THIS SAFETY CHECK: If there is no test data for this edge, skip it.
+    if len(predicted) == 0:
+        return 0.0, 0.0, 0.0  # Return zero scores so it doesn't crash
+        
     predicted = list(zip(*sorted(predicted, reverse=True, key=itemgetter(0))))[1]
 
     roc_sc = metrics.roc_auc_score(labels_all, preds_all)
@@ -106,7 +113,7 @@ def construct_placeholders(edge_types):
 #
 ###########################################################
 
-val_test_size = 0.05
+val_test_size = 0.2
 
 # Define paths for BDD files
 ppi_path = os.path.join('BDD', 'bio-decagon-ppi.csv')
@@ -229,18 +236,18 @@ flags = tf.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('neg_sample_size', 1, 'Negative sample size.')
 flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
-flags.DEFINE_integer('epochs', 50, 'Number of epochs to train.')
+flags.DEFINE_integer('epochs', 2, 'Number of epochs to train.')
 flags.DEFINE_integer('hidden1', 64, 'Number of units in hidden layer 1.')
 flags.DEFINE_integer('hidden2', 32, 'Number of units in hidden layer 2.')
 flags.DEFINE_float('weight_decay', 0, 'Weight for L2 loss on embedding matrix.')
 flags.DEFINE_float('dropout', 0.1, 'Dropout rate (1 - keep probability).')
 flags.DEFINE_float('max_margin', 0.1, 'Max margin parameter in hinge loss')
 #512
-flags.DEFINE_integer('batch_size', 16, 'minibatch size.')
+flags.DEFINE_integer('batch_size', 128, 'minibatch size.')
 flags.DEFINE_boolean('bias', True, 'Bias term.')
 # Important -- Do not evaluate/print validation performance every iteration as it can take
 # substantial amount of time
-PRINT_PROGRESS_EVERY = 150
+PRINT_PROGRESS_EVERY = 50
 
 print("Defining placeholders")
 placeholders = construct_placeholders(edge_types)
@@ -283,9 +290,24 @@ with tf.name_scope('optimizer'):
         margin=FLAGS.max_margin
     )
 
+saver = tf.train.Saver(max_to_keep=None)
+
 print("Initialize session")
 sess = tf.Session(config=config)
-sess.run(tf.global_variables_initializer())
+
+# --- SMART LOADING LOGIC ---
+# This looks for the most recent checkpoint in your folder
+ckpt = tf.train.get_checkpoint_state("checkpoints/")
+
+if ckpt and ckpt.model_checkpoint_path:
+    print(f"Restoring model from: {ckpt.model_checkpoint_path}")
+    # This loads the weights from your SSD into the GPU
+    saver.restore(sess, ckpt.model_checkpoint_path)
+else:
+    print("No checkpoint found. Initializing new variables...")
+    # This starts the model from zero (random weights)
+    sess.run(tf.global_variables_initializer())
+
 feed_dict = {}
 
 ###########################################################
@@ -295,44 +317,113 @@ feed_dict = {}
 ###########################################################
 
 print("Train model")
+
+
+# --- 1. AUTOMATIC ITERATION DETECTION (Outside the loops) ---
+start_itr = 0
+if os.path.exists('checkpoints'):
+    # This looks for any file with 'iter_' followed by numbers
+    ckpt_files = [f for f in os.listdir('checkpoints') if 'iter_' in f and f.endswith('.index')]
+    if ckpt_files:
+        # Extracts the numbers and finds the highest one
+        iters = [int(re.findall(r'iter_(\d+)', f)[0]) for f in ckpt_files]
+        start_itr = max(iters)
+        print(f"[*] Resuming from iteration: {start_itr}")
+    else:
+        print("[*] No checkpoints found, starting from 0.")
+
+# --- 2. TRAINING LOOPS ---
 for epoch in range(FLAGS.epochs):
-
+    
+    # IMPORTANT: Shuffle only if you are starting a fresh epoch
     minibatch.shuffle()
-    itr = 0
-    while not minibatch.end():
-        # Construct feed dictionary
-        feed_dict = minibatch.next_minibatch_feed_dict(placeholders=placeholders)
-        feed_dict = minibatch.update_feed_dict(
-            feed_dict=feed_dict,
-            dropout=FLAGS.dropout,
-            placeholders=placeholders)
+    
+    # Initialize itr with our detected start point
+    itr = start_itr 
+    
+    # --- 3. THE DATA FAST-FORWARD ---
+    if itr > 0:
+        print(f"[*] Fast-forwarding minibatch to iteration {itr}...")
+        for _ in range(itr):
+            minibatch.next_minibatch_feed_dict(placeholders=placeholders)
 
-        t = time.time()
+    try:
+        while not minibatch.end():
+            # Construct feed dictionary
+            feed_dict = minibatch.next_minibatch_feed_dict(placeholders=placeholders)
+            feed_dict = minibatch.update_feed_dict(
+                feed_dict=feed_dict,
+                dropout=FLAGS.dropout,
+                placeholders=placeholders)
 
-        # Training step: run single weight update
-        outs = sess.run([opt.opt_op, opt.cost, opt.batch_edge_type_idx], feed_dict=feed_dict)
-        train_cost = outs[1]
-        batch_edge_type = outs[2]
+            t = time.time()
 
-        if itr % PRINT_PROGRESS_EVERY == 0:
-            val_auc, val_auprc, val_apk = get_accuracy_scores(
-                minibatch.val_edges, minibatch.val_edges_false,
-                minibatch.idx2edge_type[minibatch.current_edge_type_idx])
+            # Training step
+            outs = sess.run([opt.opt_op, opt.cost, opt.batch_edge_type_idx], feed_dict=feed_dict)
+            train_cost = outs[1]
+            batch_edge_type = outs[2]
 
-            print("Epoch:", "%04d" % (epoch + 1), "Iter:", "%04d" % (itr + 1), "Edge:", "%04d" % batch_edge_type,
-                  "train_loss=", "{:.5f}".format(train_cost),
-                  "val_roc=", "{:.5f}".format(val_auc), "val_auprc=", "{:.5f}".format(val_auprc),
-                  "val_apk=", "{:.5f}".format(val_apk), "time=", "{:.5f}".format(time.time() - t))
+            # Print progress
+            if itr % PRINT_PROGRESS_EVERY == 0:
+                val_auc, val_auprc, val_apk = get_accuracy_scores(
+                    minibatch.val_edges, minibatch.val_edges_false,
+                    minibatch.idx2edge_type[minibatch.current_edge_type_idx])
 
-        itr += 1
+                print("Epoch:", "%04d" % (epoch + 1), "Iter:", "%04d" % (itr + 1), "Edge:", "%04d" % batch_edge_type,
+                    "train_loss=", "{:.5f}".format(train_cost),
+                    "val_roc=", "{:.5f}".format(val_auc), "val_auprc=", "{:.5f}".format(val_auprc),
+                    "val_apk=", "{:.5f}".format(val_apk), "time=", "{:.5f}".format(time.time() - t))
+            
+            itr += 1
 
+            # --- PERIODIC SAVE ---
+            if itr % 20000 == 0:
+                checkpoint_path = f"checkpoints/pfe_iter_{itr}.ckpt"
+                if not os.path.exists('checkpoints'):
+                    os.makedirs('checkpoints')
+                saver.save(sess, checkpoint_path)
+                print(f"!!! CHECKPOINT SAVED AT ITERATION {itr} !!!")
+
+    except KeyboardInterrupt:
+        print("\n[!] Training interrupted by user.")
+        choice = input("Do you want to save a checkpoint before exiting? (1 for Yes / 0 for No): ")
+        
+        if choice == '1':
+            # Replace 'saver' and 'sess' with the variable names used in your code
+            import os
+            checkpoint_path = os.path.join(FLAGS.checkpoint_dir, 'manual_interrupt_save.ckpt')
+            saver.save(sess, checkpoint_path)
+            print(f"[*] Checkpoint saved successfully at: {checkpoint_path}")
+        else:
+            print("[*] Exiting without saving.")
+        
+        # Optional: Exit the program
+        import sys
+        sys.exit(0)
+
+    # Reset start_itr to 0 after the first epoch is finished 
+    # so the second epoch starts from the beginning of the data
+    start_itr = 0 
+print("\n[*] Skipping Training... Moving directly to Final Evaluation!")
+
+# ==============================================================
+# THE FIX: Give the model the graph structure before testing
+# ==============================================================
+feed_dict = minibatch.next_minibatch_feed_dict(placeholders=placeholders)
+feed_dict = minibatch.update_feed_dict(
+    feed_dict=feed_dict,
+    dropout=0.0,
+    placeholders=placeholders
+)
 print("Optimization finished!")
 
 for et in range(num_edge_types):
     roc_score, auprc_score, apk_score = get_accuracy_scores(
         minibatch.test_edges, minibatch.test_edges_false, minibatch.idx2edge_type[et])
-    print("Edge type=", "[%02d, %02d, %02d]" % minibatch.idx2edge_type[et])
-    print("Edge type:", "%04d" % et, "Test AUROC score", "{:.5f}".format(roc_score))
-    print("Edge type:", "%04d" % et, "Test AUPRC score", "{:.5f}".format(auprc_score))
-    print("Edge type:", "%04d" % et, "Test AP@k score", "{:.5f}".format(apk_score))
-    print()
+    
+    # Format the array part like [01, 01, 198]
+    edge_array = "[{:02d}, {:02d}, {:02d}]".format(*minibatch.idx2edge_type[et])
+    
+    # Print everything side-by-side using unified {} formatting
+    print("Edge: {:04d} {} AUROC: {:.5f} | AUPRC: {:.5f} | AP@k: {:.5f}".format(
+        et, edge_array, roc_score, auprc_score, apk_score))

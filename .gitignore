@@ -102,4 +102,5 @@ ENV/
 
 .BDD
 BDD/
-
+.checkpoints
+checkpoints/
