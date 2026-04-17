@@ -308,7 +308,110 @@ else:
     # This starts the model from zero (random weights)
     sess.run(tf.global_variables_initializer())
 
-feed_dict = {}
+# ==============================================================
+# INTERACTIVE LOOP STARTS HERE (Indented to the left/global level)
+# ==============================================================
+
+# =============== START MEDBOT CLIENT ===============
+
+print("\n[*] Initializing MedBot Architecture...")
+
+# 1. Restore the trained weights
+CHECKPOINT_PATH = "checkpoints/pfe_iter_60000.ckpt" 
+
+if os.path.exists(CHECKPOINT_PATH + ".index"):
+    saver.restore(sess, CHECKPOINT_PATH)
+    print(f"[*] MedBot Brain Successfully Loaded from {CHECKPOINT_PATH}")
+else:
+    print(f"[!] ERROR: Checkpoint not found at {CHECKPOINT_PATH}")
+    sys.exit(1)
+
+# ==============================================================
+# THE CRITICAL FIX: Reset the data iterator so it isn't empty!
+# ==============================================================
+minibatch.shuffle() 
+
+# 2. Interactive Loop
+# 1. BUILD THE MASTER STRUCTURAL FEED DICT
+# This manually feeds the raw adjacency matrices and features into the graph,
+# bypassing the exhausted minibatch iterator completely.
+master_feed_dict = {}
+
+# Feed Adjacency Matrices
+for i, j in edge_types:
+    for k in range(edge_types[i,j]):
+        # Convert dense matrices to sparse tuples required by TensorFlow
+        sparse_mat = preprocessing.sparse_to_tuple(adj_mats_orig[(i, j)][k])
+        master_feed_dict[placeholders['adj_mats_%d,%d,%d' % (i, j, k)]] = sparse_mat
+
+# Feed Node Features
+for i, _ in edge_types:
+    master_feed_dict[placeholders['feat_%d' % i]] = feat[i]
+
+# 2. Interactive Loop
+print("\n" + "="*40)
+print("       MEDBOT INTERACTION CLIENT       ")
+print("="*40)
+
+while True:
+    print("\nExample IDs: CID000003362 (Warfarin), CID000002244 (Aspirin)")
+    d1 = input("Enter Drug A ID (or 'exit'): ").strip()
+    if d1.lower() == 'exit': break
+    d2 = input("Enter Drug B ID: ").strip()
+    
+    if d1 not in drug2idx or d2 not in drug2idx:
+        print("Error: One of the drugs was not found in the database.")
+        continue
+        
+    idx_a = drug2idx[d1]
+    idx_b = drug2idx[d2]
+    
+    print(f"\nScanning all side effects for {d1} + {d2}...")
+    
+    predicted_side_effects = []
+    
+    try:
+        # Loop through all the side effects your model was trained on
+        for se_idx in range(len(sorted_se)):
+            
+            feed_dict = master_feed_dict.copy()
+            
+            feed_dict.update({
+                placeholders['batch']: np.array([[idx_a, idx_b]], dtype=np.int32), 
+                placeholders['batch_edge_type_idx']: int(se_idx),
+                placeholders['batch_row_edge_type']: 1,  
+                placeholders['batch_col_edge_type']: 1,
+                placeholders['dropout']: 0.0,
+                placeholders['degrees']: np.zeros(1, dtype=np.int32)
+            })
+            
+            score = sess.run(opt.predictions, feed_dict=feed_dict)
+            raw_val = float(score[0][0]) if isinstance(score[0], np.ndarray) else float(score[0])
+            prob = 1 / (1 + np.exp(-raw_val)) 
+            
+            # If the probability is greater than 50%, record it
+            if prob > 0.50:
+                se_id = sorted_se[se_idx]
+                se_name = se2name[se_id]
+                predicted_side_effects.append((se_name, prob))
+        
+        # Sort the side effects from highest risk to lowest risk
+        predicted_side_effects.sort(key=lambda x: x[1], reverse=True)
+        
+        if len(predicted_side_effects) == 0:
+            print("Result: Interaction appears safe. No high-risk side effects detected.")
+        else:
+            print(f"ALERT: {len(predicted_side_effects)} potential side effects predicted!")
+            print("-" * 50)
+            
+            # Print the Top 10 most likely side effects
+            for name, p in predicted_side_effects[:10]:
+                risk_bar = "#" * int(p * 20) + "-" * (20 - int(p * 20))
+                print(f"[{risk_bar}] {p:.2%} | {name}")
+            print("-" * 50)
+                
+    except Exception as e:
+        print(f"Prediction Error: {e}")
 
 ###########################################################
 #
@@ -406,24 +509,90 @@ if os.path.exists('checkpoints'):
 #     start_itr = 0 
 print("\n[*] Skipping Training... Moving directly to Final Evaluation!")
 
+
+# =============== START MEDBOT CLIENT ===============
+
+print("\n[*] Initializing MedBot Architecture...")
+
+# 1. Restore the trained weights (Make sure this path is correct!)
+CHECKPOINT_PATH = "checkpoints/pfe_iter_60000.ckpt" 
+
+if os.path.exists(CHECKPOINT_PATH + ".index"):
+    saver.restore(sess, CHECKPOINT_PATH)
+    print(f"[*] MedBot Brain Successfully Loaded from {CHECKPOINT_PATH}")
+else:
+    print(f"[!] ERROR: Checkpoint not found at {CHECKPOINT_PATH}")
+    sys.exit(1)
+
+# 2. Interactive Loop
+print("\n" + "="*40)
+print("       MEDBOT INTERACTION CLIENT       ")
+print("="*40)
+
+while True:
+    print("\nExample IDs: CID000003362 (Warfarin), CID000002244 (Aspirin)")
+    d1 = input("Enter Drug A ID (or 'exit'): ").strip()
+    if d1.lower() == 'exit': break
+    d2 = input("Enter Drug B ID: ").strip()
+    
+    if d1 not in drug2idx or d2 not in drug2idx:
+        print("Error: One of the drugs was not found in the database.")
+        continue
+        
+    idx_a = drug2idx[d1]
+    idx_b = drug2idx[d2]
+    
+    # We test for Side Effect 0 (You can prompt the user for this later!)
+    se_idx = 0 
+    
+    # Feed the exact format the Decagon optimizer expects
+    feed_dict = {
+        placeholders['batch']: [[idx_a, idx_b]], 
+        placeholders['batch_edge_type_idx']: se_idx,
+        placeholders['batch_row_edge_type']: 1,  
+        placeholders['batch_col_edge_type']: 1,
+        placeholders['dropout']: 0.0
+    }
+    
+    try:
+        # Run the prediction through the optimizer's prediction tensor
+        score = sess.run(opt.predictions, feed_dict=feed_dict)
+        
+        # Convert logit to probability
+        prob = 1 / (1 + np.exp(-score[0])) 
+        
+        print(f"\nAnalyzing {d1} + {d2}...")
+        risk = int(prob * 20)
+        bar = "#" * risk + "-" * (20 - risk)
+        print(f"Risk Level: [{bar}] {prob:.2%}")
+        
+        if prob > 0.5:
+            print("ALERT: Dangerous Interaction Predicted!")
+        else:
+            print("Result: Interaction appears safe.")
+            
+    except Exception as e:
+        print(f"Prediction Error: {e}")
+
+        
 # ==============================================================
 # THE FIX: Give the model the graph structure before testing
 # ==============================================================
-feed_dict = minibatch.next_minibatch_feed_dict(placeholders=placeholders)
-feed_dict = minibatch.update_feed_dict(
-    feed_dict=feed_dict,
-    dropout=0.0,
-    placeholders=placeholders
-)
-print("Optimization finished!")
+# feed_dict = minibatch.next_minibatch_feed_dict(placeholders=placeholders)
+# feed_dict = minibatch.update_feed_dict(
+#     feed_dict=feed_dict,
+#     dropout=0.0,
+#     placeholders=placeholders
+# )
+# print("Optimization finished!")
 
-for et in range(num_edge_types):
-    roc_score, auprc_score, apk_score = get_accuracy_scores(
-        minibatch.test_edges, minibatch.test_edges_false, minibatch.idx2edge_type[et])
+# for et in range(num_edge_types):
+#     roc_score, auprc_score, apk_score = get_accuracy_scores(
+#         minibatch.test_edges, minibatch.test_edges_false, minibatch.idx2edge_type[et])
     
-    # Format the array part like [01, 01, 198]
-    edge_array = "[{:02d}, {:02d}, {:02d}]".format(*minibatch.idx2edge_type[et])
+#     # Format the array part like [01, 01, 198]
+#     edge_array = "[{:02d}, {:02d}, {:02d}]".format(*minibatch.idx2edge_type[et])
     
-    # Print everything side-by-side using unified {} formatting
-    print("Edge: {:04d} {} AUROC: {:.5f} | AUPRC: {:.5f} | AP@k: {:.5f}".format(
-        et, edge_array, roc_score, auprc_score, apk_score))
+#     # Print everything side-by-side using unified {} formatting
+#     print("Edge: {:04d} {} AUROC: {:.5f} | AUPRC: {:.5f} | AP@k: {:.5f}".format(
+#         et, edge_array, roc_score, auprc_score, apk_score))
